@@ -25,7 +25,6 @@ steps:
       - '--region'
       - 'us-central1'
       - '--platform'
-      - 'managed'
       - '--allow-unauthenticated'
       # To set environment variables securely, you would either use Google Secret Manager 
       # or set them directly via the CLI below:
@@ -36,3 +35,6 @@ steps:
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/jab-fb-messenger'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
