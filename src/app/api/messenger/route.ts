@@ -1,24 +1,11 @@
 import { NextRequest } from "next/server";
-import OpenAI from "openai";
 import Airtable from "airtable";
 import axios from 'axios';
+import { handleUserMessage } from "@/lib/openai";
 
-// ---------- Initialize Clients Lazily ----------
+// ---------- Initialize Airtable Lazily ----------
 
-let _openai: OpenAI | null = null;
 let _airtable: any = null;
-
-function getOpenAI() {
-  if (!_openai) {
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("OPENAI_API_KEY missing");
-      _openai = new OpenAI({ apiKey: 'placeholder' });
-    } else {
-      _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    }
-  }
-  return _openai;
-}
 
 function getAirtable() {
   if (!_airtable) {
@@ -69,14 +56,12 @@ export async function POST(req: NextRequest) {
     }
 
     const {
-      OPENAI_AGENT_ID,
       AIRTABLE_MESSENGER_TABLE,
       FACEBOOK_PAGE_ACCESS_TOKEN,
       FACEBOOK_WEBHOOK_URL,
     } = process.env;
 
     const airtable = getAirtable();
-    const openai = getOpenAI();
 
     // ---------- Load Conversation History ----------
 
@@ -105,34 +90,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Append new user message
-    conversationHistory.push({
-      role: "user",
-      content: messageText,
-    });
-
-    // ---------- Call OpenAI Agent API (v6.x) ----------
+    // ---------- Call OpenAI Agents SDK ----------
+    
+    console.log(`Processing message from ${senderId}: ${messageText}`);
+    
+    const agentResult = await handleUserMessage(messageText, conversationHistory);
+    
     let reply = "Thanks for reaching out. How can I assist you today?";
+    let updatedHistory = conversationHistory;
 
-    try {
-      const response = await openai.responses.create({
-        agent_id: OPENAI_AGENT_ID!,
-        model: "gpt-4o", // Satisfy API requirement if agent doesn't specify default
-        input: conversationHistory,
-      } as any);
-
-      // Depending on the version, standard output_text is used
-      reply = (response as any).output_text || (response as any).text || (response as any).content || reply;
-    } catch (agentError) {
-      console.error("Agent Builder error:", agentError);
-      reply = "Sorry, my brain is having a moment. I'll get back to you soon.";
+    if (agentResult) {
+        reply = agentResult.reply;
+        updatedHistory = agentResult.newHistory;
+    } else {
+        console.error("Failed to get response from Agents SDK");
+        reply = "Sorry, my brain is having a moment. I'll get back to you soon.";
     }
-
-    // Append assistant reply
-    conversationHistory.push({
-      role: "assistant",
-      content: reply,
-    });
 
     // ---------- Persist Updated Conversation ----------
 
@@ -140,12 +113,12 @@ export async function POST(req: NextRequest) {
       try {
         if (airtableRecordId) {
           await airtable(AIRTABLE_MESSENGER_TABLE).update(airtableRecordId, {
-            "Message History": JSON.stringify(conversationHistory)
+            "Message History": JSON.stringify(updatedHistory)
           });
         } else {
           await airtable(AIRTABLE_MESSENGER_TABLE).create({
             "Facebook User ID": senderId,
-            "Message History": JSON.stringify(conversationHistory)
+            "Message History": JSON.stringify(updatedHistory)
           });
         }
       } catch (e) {
@@ -188,7 +161,6 @@ export async function POST(req: NextRequest) {
     return new Response("EVENT_RECEIVED", { status: 200 });
   } catch (error) {
     console.error("Messenger webhook error:", error);
-    // IMPORTANT: Always return 200 to Facebook
     return new Response("EVENT_RECEIVED", { status: 200 });
   }
 }

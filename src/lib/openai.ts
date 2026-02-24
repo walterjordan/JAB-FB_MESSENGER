@@ -1,57 +1,74 @@
-import OpenAI from 'openai';
+import { Agent, Runner, AgentInputItem } from "@openai/agents";
 
-let openai: OpenAI;
-
-function getOpenAIClient() {
-  if (!openai) {
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("OPENAI_API_KEY is not set. OpenAI operations will fail.");
-    }
-    openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY || 'placeholder-for-build',
-    });
-  }
-  return openai;
-}
-
-const getAgentId = () => process.env.OPENAI_AGENT_ID!;
+const getAgentId = () => process.env.OPENAI_AGENT_ID || "wf_699c6879501c81908f9023abbc16e191098190d79d244a46";
 
 /**
- * Creates a new pseudo-thread ID for the conversation.
- * If using the new responses API with agent_id, the history array serves as state,
- * but we still use threadId to fetch from Airtable.
+ * Handles the user message by using the specialized OpenAI Agents SDK.
+ * This SDK is required to interact with 'wf_' workflow IDs from Agent Builder.
  */
-export async function createThread() {
-  return crypto.randomUUID();
-}
-
-/**
- * Handles the user message by using the new OpenAI Responses API.
- */
-export async function handleUserMessage(threadId: string, message: string, conversationHistory: any[] = []): Promise<string | null> {
+export async function handleUserMessage(message: string, conversationHistory: any[] = []): Promise<{ reply: string, newHistory: any[] } | null> {
   try {
-    const client = getOpenAIClient();
     const AGENT_ID = getAgentId();
 
-    // Append the new user message to the existing history
-    const inputHistory = [
-      ...conversationHistory,
-      { role: 'user', content: message }
+    // 1. Define the Agent configuration (as shown in agentsdk.md)
+    const agent = new Agent({
+      name: "JAB Messenger Intent Agent",
+      instructions: `You are a business automation assistant responding to Facebook Messenger inquiries. Your goals are:
+Qualify the lead.
+Answer questions clearly and concisely.
+Offer the next step (book call, get pricing, demo, etc.).
+Escalate to a human if requested.
+Never fabricate pricing or policies. If missing required information, ask clarifying questions.`,
+      model: "gpt-4o",
+      modelSettings: {
+        temperature: 1,
+        topP: 1,
+        maxTokens: 2048,
+        store: true
+      }
+    });
+
+    // 2. Format history for the SDK
+    // If conversationHistory is empty, we start fresh. 
+    // If not, we need to ensure it's in the AgentInputItem format.
+    const items: AgentInputItem[] = conversationHistory.length > 0 
+        ? conversationHistory 
+        : [];
+
+    // Add the new user message
+    items.push({ 
+        role: "user", 
+        content: [{ type: "input_text", text: message }] 
+    });
+
+    // 3. Initialize the Runner with the workflow ID
+    const runner = new Runner({
+      traceMetadata: {
+        __trace_source__: "agent-builder",
+        workflow_id: AGENT_ID
+      }
+    });
+
+    // 4. Run the agent
+    const result = await runner.run(agent, items);
+
+    if (!result.finalOutput) {
+        throw new Error("Agent result is undefined");
+    }
+
+    // 5. Update history with assistant responses
+    const updatedHistory = [
+        ...items,
+        ...result.newItems.map((item) => item.rawItem)
     ];
 
-    const response = await client.responses.create({
-      agent_id: AGENT_ID,
-      input: inputHistory,
-    } as any);
-
-    // Depending on the exact typing of the new SDK, extract the text.
-    // theplan.md suggests `response.output_text`
-    const reply = (response as any).output_text || (response as any).text || (response as any).content || 'No text response from AI.';
-
-    return reply;
+    return {
+      reply: result.finalOutput,
+      newHistory: updatedHistory
+    };
 
   } catch (error) {
-    console.error('Error communicating with OpenAI Agent API:', error);
+    console.error('Error communicating with OpenAI Agents SDK:', error);
     return null;
   }
 }
