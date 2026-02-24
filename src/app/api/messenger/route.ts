@@ -1,135 +1,196 @@
-import { NextResponse } from 'next/server';
-import { getConversation, createConversation, logMessageToAirtable } from '@/lib/airtable';
-import { createThread, handleUserMessage } from '@/lib/openai';
-import { sendFacebookMessage } from '@/lib/facebook';
+import { NextRequest } from "next/server";
+import OpenAI from "openai";
+import Airtable from "airtable";
 import axios from 'axios';
 
-// --- Verification Route for Facebook ---
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
+// ---------- Initialize Clients Lazily ----------
 
-  // Facebook sends these parameters for verification
-  const mode = searchParams.get('hub.mode');
-  const token = searchParams.get('hub.verify_token');
-  const challenge = searchParams.get('hub.challenge');
+let _openai: OpenAI | null = null;
+let _airtable: any = null;
 
-  const verifyToken = process.env.FACEBOOK_VERIFY_TOKEN;
-
-  if (mode === 'subscribe' && token === verifyToken) {
-    console.log('WEBHOOK_VERIFIED');
-    // Important: Must return the challenge back to Facebook as a plain text string
-    return new NextResponse(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } });
-  }
-
-  // If token mismatch
-  console.log('WEBHOOK_VERIFICATION_FAILED');
-  return new NextResponse('Forbidden', { status: 403 });
-}
-
-// --- Main Webhook Receiver ---
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-
-    // 1. Verify this is from a page subscription
-    if (body.object !== 'page') {
-      return new NextResponse('Not a page object', { status: 404 });
-    }
-
-    // 2. Process each entry (there may be multiple if batched)
-    for (const entry of body.entry) {
-      // Process each messaging event
-      for (const event of entry.messaging) {
-        
-        // We only care about standard text messages right now
-        if (event.message && event.message.text) {
-          await processMessageEvent(event);
-        } else {
-            console.log('Received webhook event that is not a standard text message:', event);
-        }
-      }
-    }
-
-    // ALWAYS return a 200 OK to Facebook, or they will keep retrying and eventually disable the webhook
-    return new NextResponse('EVENT_RECEIVED', { status: 200 });
-
-  } catch (error) {
-    console.error('Error processing webhook:', error);
-    // Still return 200 to prevent Facebook from backing off, but log internally
-    return new NextResponse('Internal Error Processed', { status: 200 });
-  }
-}
-
-/**
- * Core business logic for handling a single user message.
- */
-async function processMessageEvent(event: any) {
-  const senderId = event.sender.id;
-  const messageText = event.message.text;
-
-  console.log(`Received message from ${senderId}: ${messageText}`);
-
-  try {
-    // --- 1. Load or Create Conversation State ---
-    let record = await getConversation(senderId);
-    let threadId: string;
-    let history = '';
-
-    if (record) {
-      console.log(`Found existing conversation for user ${senderId} with Thread ID: ${record.threadId}`);
-      threadId = record.threadId;
-      // Ideally fetch history here if your Airtable util reads it, but we append locally for now.
+function getOpenAI() {
+  if (!_openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn("OPENAI_API_KEY missing");
+      _openai = new OpenAI({ apiKey: 'placeholder' });
     } else {
-      console.log(`Creating new thread for user ${senderId}`);
-      threadId = await createThread();
-      record = await createConversation(senderId, threadId);
-      console.log(`Created Airtable Record: ${record?.id}`);
+      _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    }
+  }
+  return _openai;
+}
+
+function getAirtable() {
+  if (!_airtable) {
+    const { AIRTABLE_API_KEY, AIRTABLE_BASE_ID } = process.env;
+    if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID) {
+      _airtable = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
+    }
+  }
+  return _airtable;
+}
+
+// ---------- Facebook Webhook Verification (GET) ----------
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+
+  const mode = searchParams.get("hub.mode");
+  const token = searchParams.get("hub.verify_token");
+  const challenge = searchParams.get("hub.challenge");
+
+  const { FACEBOOK_VERIFY_TOKEN } = process.env;
+
+  if (mode === "subscribe" && token === FACEBOOK_VERIFY_TOKEN) {
+    console.log("Webhook verified");
+    return new Response(challenge, { status: 200 });
+  }
+
+  return new Response("Verification failed", { status: 403 });
+}
+
+// ---------- Handle Incoming Messages (POST) ----------
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+
+    const messagingEvent = body?.entry?.[0]?.messaging?.[0];
+    const senderId = messagingEvent?.sender?.id;
+    const messageText = messagingEvent?.message?.text;
+
+    // Ignore echoes and non-text
+    if (messagingEvent?.message?.is_echo) {
+      return new Response("Echo ignored", { status: 200 });
     }
 
-    // --- 2. Send Message to OpenAI Agent ---
-    console.log(`Sending message to OpenAI thread ${threadId}`);
-    // Optional: Add a typing indicator here using Graph API if desired
-    
-    const aiResponse = await handleUserMessage(threadId, messageText);
-    
-    if (!aiResponse) {
-       console.error('No response received from AI Agent.');
-       await sendFacebookMessage(senderId, 'Sorry, I am having trouble connecting to my brain right now.');
-       return;
+    if (!senderId || !messageText) {
+      return new Response("No message content", { status: 200 });
     }
 
-    console.log(`AI Response: ${aiResponse}`);
+    const {
+      OPENAI_AGENT_ID,
+      AIRTABLE_MESSENGER_TABLE,
+      FACEBOOK_PAGE_ACCESS_TOKEN,
+      FACEBOOK_WEBHOOK_URL,
+    } = process.env;
 
-    // --- 3. Send Reply to Facebook ---
-    await sendFacebookMessage(senderId, aiResponse);
+    const airtable = getAirtable();
+    const openai = getOpenAI();
 
-    // --- 4. Update Airtable (Log messages) ---
-    // If you implemented the message history logic
-    if (record && record.id) {
-       // A proper implementation would fetch current history first, 
-       // but logMessageToAirtable needs adjustment if you want full persistence
-       await logMessageToAirtable(record.id, '', 'User', messageText);
-       await logMessageToAirtable(record.id, '', 'AI', aiResponse);
-    }
+    // ---------- Load Conversation History ----------
 
-    // --- 5. (Optional) Trigger Make.com Webhook ---
-    const makeWebhookUrl = process.env.FACEBOOK_WEBHOOK_URL; 
-    if (makeWebhookUrl && makeWebhookUrl.includes('make.com')) {
+    let conversationHistory: any[] = [];
+    let airtableRecordId: string | null = null;
+
+    if (airtable && AIRTABLE_MESSENGER_TABLE) {
       try {
-        await axios.post(makeWebhookUrl, {
-           fbUserId: senderId,
-           userMessage: messageText,
-           aiResponse: aiResponse,
-           timestamp: new Date().toISOString()
-        });
-        console.log('Successfully pinged Make.com webhook');
-      } catch (makeError) {
-         console.error('Failed to ping Make.com webhook:', makeError);
+        const records = await airtable(AIRTABLE_MESSENGER_TABLE)
+          .select({
+            filterByFormula: `{PSID} = "${senderId}"`,
+            maxRecords: 1,
+          })
+          .firstPage();
+
+        if (records.length > 0) {
+          const record = records[0];
+          airtableRecordId = record.id;
+          const existingLog = record.get("Conversation Log");
+          if (existingLog) {
+            conversationHistory = JSON.parse(existingLog as string);
+          }
+        }
+      } catch (e) {
+        console.error("Airtable fetch error:", e);
       }
     }
 
-  } catch (err) {
-    console.error(`Failed to process message for ${senderId}:`, err);
-    await sendFacebookMessage(senderId, 'An error occurred while processing your request.');
+    // Append new user message
+    conversationHistory.push({
+      role: "user",
+      content: messageText,
+    });
+
+    // ---------- Call OpenAI Agent API (v6.x) ----------
+    let reply = "Thanks for reaching out. How can I assist you today?";
+
+    try {
+      const response = await openai.responses.create({
+        agent_id: OPENAI_AGENT_ID!,
+        input: conversationHistory,
+      } as any);
+
+      // Depending on the version, standard output_text is used
+      reply = (response as any).output_text || (response as any).text || (response as any).content || reply;
+    } catch (agentError) {
+      console.error("Agent Builder error:", agentError);
+      reply = "Sorry, my brain is having a moment. I'll get back to you soon.";
+    }
+
+    // Append assistant reply
+    conversationHistory.push({
+      role: "assistant",
+      content: reply,
+    });
+
+    // ---------- Persist Updated Conversation ----------
+
+    if (airtable && AIRTABLE_MESSENGER_TABLE) {
+      try {
+        if (airtableRecordId) {
+          await airtable(AIRTABLE_MESSENGER_TABLE).update(airtableRecordId, {
+            "Conversation Log": JSON.stringify(conversationHistory),
+            "Last Message": messageText,
+          });
+        } else {
+          await airtable(AIRTABLE_MESSENGER_TABLE).create({
+            PSID: senderId,
+            "Conversation Log": JSON.stringify(conversationHistory),
+            "Last Message": messageText,
+            Status: "Open",
+          });
+        }
+      } catch (e) {
+        console.error("Airtable save error:", e);
+      }
+    }
+
+    // ---------- Send Reply Back to Facebook ----------
+
+    try {
+      await fetch(
+        `https://graph.facebook.com/v19.0/me/messages?access_token=${FACEBOOK_PAGE_ACCESS_TOKEN}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            recipient: { id: senderId },
+            message: { text: reply },
+          }),
+        }
+      );
+    } catch (fbError) {
+      console.error("Facebook API error:", fbError);
+    }
+
+    // ---------- (Optional) Make.com webhook ----------
+    if (FACEBOOK_WEBHOOK_URL && FACEBOOK_WEBHOOK_URL.includes("make.com")) {
+       try {
+           await axios.post(FACEBOOK_WEBHOOK_URL, {
+               fbUserId: senderId,
+               userMessage: messageText,
+               aiResponse: reply,
+               timestamp: new Date().toISOString()
+           });
+       } catch (e) {
+           console.error("Make webhook error:", e);
+       }
+    }
+
+    return new Response("EVENT_RECEIVED", { status: 200 });
+  } catch (error) {
+    console.error("Messenger webhook error:", error);
+    // IMPORTANT: Always return 200 to Facebook
+    return new Response("EVENT_RECEIVED", { status: 200 });
   }
 }

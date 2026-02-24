@@ -1,57 +1,57 @@
-import axios from 'axios';
+import OpenAI from 'openai';
 
-// Using the CLOUD_RUN_URL from your .env.local
-const MCP_URL = process.env.CLOUD_RUN_URL || 'https://jab-ai-mcp-199373649190.us-central1.run.app';
-const NOTEBOOK_ID = process.env.NOTEBOOK_ID; 
+let openai: OpenAI;
+
+function getOpenAIClient() {
+  if (!openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn("OPENAI_API_KEY is not set. OpenAI operations will fail.");
+    }
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY || 'placeholder-for-build',
+    });
+  }
+  return openai;
+}
+
+const getAgentId = () => process.env.OPENAI_AGENT_ID!;
 
 /**
  * Creates a new pseudo-thread ID for the conversation.
- * NotebookLLM just needs a unique string for the conversation_id.
+ * If using the new responses API with agent_id, the history array serves as state,
+ * but we still use threadId to fetch from Airtable.
  */
-export async function createThread(): Promise<string> {
+export async function createThread() {
   return crypto.randomUUID();
 }
 
 /**
- * Sends a message to the NotebookLLM MCP server.
- * Returns the text of the response.
+ * Handles the user message by using the new OpenAI Responses API.
  */
-export async function handleUserMessage(threadId: string, message: string): Promise<string | null> {
-  if (!NOTEBOOK_ID) {
-    console.error('NOTEBOOK_ID environment variable is missing.');
-    return 'System configuration error: NOTEBOOK_ID is missing. Please contact the administrator.';
-  }
-
+export async function handleUserMessage(threadId: string, message: string, conversationHistory: any[] = []): Promise<string | null> {
   try {
-    const response = await axios.post(`${MCP_URL}/notebook_query`, {
-      notebook_id: NOTEBOOK_ID,
-      query: message,
-      conversation_id: threadId
-    });
+    const client = getOpenAIClient();
+    const AGENT_ID = getAgentId();
 
-    // Extract the text response from the MCP server
-    if (response.data) {
-        if (typeof response.data === 'string') {
-            return response.data;
-        } else if (response.data.text) {
-            return response.data.text;
-        } else if (response.data.response) {
-            return response.data.response;
-        } else if (response.data.answer) {
-            return response.data.answer;
-        } else {
-             // Fallback if the response structure is unexpected
-             return JSON.stringify(response.data);
-        }
-    }
-    return 'No response data received from the brain.';
+    // Append the new user message to the existing history
+    const inputHistory = [
+      ...conversationHistory,
+      { role: 'user', content: message }
+    ];
+
+    const response = await client.responses.create({
+      agent_id: AGENT_ID,
+      input: inputHistory,
+    } as any);
+
+    // Depending on the exact typing of the new SDK, extract the text.
+    // theplan.md suggests `response.output_text`
+    const reply = (response as any).output_text || (response as any).text || (response as any).content || 'No text response from AI.';
+
+    return reply;
 
   } catch (error) {
-    if (axios.isAxiosError(error)) {
-         console.error('Error communicating with NotebookLLM MCP:', error.response?.data || error.message);
-    } else {
-         console.error('Unknown error communicating with NotebookLLM MCP:', error);
-    }
+    console.error('Error communicating with OpenAI Agent API:', error);
     return null;
   }
 }
