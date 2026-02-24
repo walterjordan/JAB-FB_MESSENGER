@@ -1,70 +1,57 @@
-import OpenAI from 'openai';
+import axios from 'axios';
 
-let openai: OpenAI;
-
-function getOpenAIClient() {
-  if (!openai) {
-    if (!process.env.OPENAI_API_KEY) {
-      console.warn("OPENAI_API_KEY is not set. OpenAI operations will fail.");
-    }
-    openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY || 'placeholder-for-build',
-    });
-  }
-  return openai;
-}
-
-const getAgentId = () => process.env.OPENAI_AGENT_ID!;
+// Using the CLOUD_RUN_URL from your .env.local
+const MCP_URL = process.env.CLOUD_RUN_URL || 'https://jab-ai-mcp-199373649190.us-central1.run.app';
+const NOTEBOOK_ID = process.env.NOTEBOOK_ID; 
 
 /**
- * Creates a new OpenAI Thread for a new conversation.
+ * Creates a new pseudo-thread ID for the conversation.
+ * NotebookLLM just needs a unique string for the conversation_id.
  */
-export async function createThread() {
-  const client = getOpenAIClient();
-  const thread = await client.beta.threads.create();
-  return thread.id;
+export async function createThread(): Promise<string> {
+  return crypto.randomUUID();
 }
 
 /**
- * Adds a message to an existing thread and runs the Assistant.
- * Returns the text of the Assistant's response.
+ * Sends a message to the NotebookLLM MCP server.
+ * Returns the text of the response.
  */
 export async function handleUserMessage(threadId: string, message: string): Promise<string | null> {
+  if (!NOTEBOOK_ID) {
+    console.error('NOTEBOOK_ID environment variable is missing.');
+    return 'System configuration error: NOTEBOOK_ID is missing. Please contact the administrator.';
+  }
+
   try {
-    const client = getOpenAIClient();
-    const AGENT_ID = getAgentId();
-
-    // 1. Add the user's message to the thread
-    await client.beta.threads.messages.create(threadId, {
-      role: 'user',
-      content: message,
+    const response = await axios.post(`${MCP_URL}/notebook_query`, {
+      notebook_id: NOTEBOOK_ID,
+      query: message,
+      conversation_id: threadId
     });
 
-    // 2. Run the Assistant
-    const run = await client.beta.threads.runs.createAndPoll(threadId, {
-      assistant_id: AGENT_ID,
-    });
-
-    // 3. Handle the run status
-    if (run.status === 'completed') {
-      const messages = await client.beta.threads.messages.list(threadId);
-      
-      for (const msg of messages.data) {
-        if (msg.role === 'assistant') {
-           const textContent = msg.content.find(c => c.type === 'text');
-           if (textContent && textContent.type === 'text') {
-             return textContent.text.value;
-           }
+    // Extract the text response from the MCP server
+    if (response.data) {
+        if (typeof response.data === 'string') {
+            return response.data;
+        } else if (response.data.text) {
+            return response.data.text;
+        } else if (response.data.response) {
+            return response.data.response;
+        } else if (response.data.answer) {
+            return response.data.answer;
+        } else {
+             // Fallback if the response structure is unexpected
+             return JSON.stringify(response.data);
         }
-      }
-      return 'No text response from AI.';
-    } else {
-      console.error(`Run finished with unexpected status: ${run.status}`);
-      return `Error: Agent run status was ${run.status}`;
     }
+    return 'No response data received from the brain.';
 
   } catch (error) {
-    console.error('Error communicating with OpenAI:', error);
+    if (axios.isAxiosError(error)) {
+         console.error('Error communicating with NotebookLLM MCP:', error.response?.data || error.message);
+    } else {
+         console.error('Unknown error communicating with NotebookLLM MCP:', error);
+    }
     return null;
   }
 }
