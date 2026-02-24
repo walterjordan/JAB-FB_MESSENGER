@@ -19,19 +19,14 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'jab-fb-messenger' # Deploying to a NEW service
+      - 'jab-fb-messenger'
       - '--image'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/jab-fb-messenger:latest'
       - '--region'
       - 'us-central1'
-      - '--platform'
       - '--allow-unauthenticated'
-      # To set environment variables securely, you would either use Google Secret Manager 
-      # or set them directly via the CLI below:
       - '--set-env-vars'
       - 'FACEBOOK_VERIFY_TOKEN=jabjab0199,FACEBOOK_WEBHOOK_URL=https://hook.us2.make.com/scuv78ktnwdocsw11h5tcy3n886f68pi,GOOGLE_CLOUD_PROJECT=f2w-consulting'
-      # We don't want to expose API keys in plaintext in cloudbuild.yaml.
-      # You should set these in Secret Manager or manually on the Cloud Run service after first deploy!
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/jab-fb-messenger'
