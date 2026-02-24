@@ -1,16 +1,27 @@
 import OpenAI from 'openai';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let openai: OpenAI;
 
-const AGENT_ID = process.env.OPENAI_AGENT_ID!;
+function getOpenAIClient() {
+  if (!openai) {
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn("OPENAI_API_KEY is not set. OpenAI operations will fail.");
+    }
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY || 'placeholder-for-build',
+    });
+  }
+  return openai;
+}
+
+const getAgentId = () => process.env.OPENAI_AGENT_ID!;
 
 /**
  * Creates a new OpenAI Thread for a new conversation.
  */
 export async function createThread() {
-  const thread = await openai.beta.threads.create();
+  const client = getOpenAIClient();
+  const thread = await client.beta.threads.create();
   return thread.id;
 }
 
@@ -20,28 +31,26 @@ export async function createThread() {
  */
 export async function handleUserMessage(threadId: string, message: string): Promise<string | null> {
   try {
+    const client = getOpenAIClient();
+    const AGENT_ID = getAgentId();
+
     // 1. Add the user's message to the thread
-    await openai.beta.threads.messages.create(threadId, {
+    await client.beta.threads.messages.create(threadId, {
       role: 'user',
       content: message,
     });
 
     // 2. Run the Assistant
-    const run = await openai.beta.threads.runs.createAndPoll(threadId, {
+    const run = await client.beta.threads.runs.createAndPoll(threadId, {
       assistant_id: AGENT_ID,
-      // You can also pass additional instructions here if needed
-      // instructions: "Additional context for this specific run..." 
     });
 
     // 3. Handle the run status
     if (run.status === 'completed') {
-      // Fetch the messages added by the assistant
-      const messages = await openai.beta.threads.messages.list(threadId);
+      const messages = await client.beta.threads.messages.list(threadId);
       
-      // The newest message is first in the list, we want the first assistant message
       for (const msg of messages.data) {
         if (msg.role === 'assistant') {
-           // Extract text content
            const textContent = msg.content.find(c => c.type === 'text');
            if (textContent && textContent.type === 'text') {
              return textContent.text.value;
