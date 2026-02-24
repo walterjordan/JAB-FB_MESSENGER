@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
       try {
         const records = await airtable(AIRTABLE_MESSENGER_TABLE)
           .select({
-            filterByFormula: `{PSID} = "${senderId}"`,
+            filterByFormula: `{Facebook User ID} = "${senderId}"`,
             maxRecords: 1,
           })
           .firstPage();
@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
         if (records.length > 0) {
           const record = records[0];
           airtableRecordId = record.id;
-          const existingLog = record.get("Conversation Log");
+          const existingLog = record.get("Message History");
           if (existingLog) {
             conversationHistory = JSON.parse(existingLog as string);
           }
@@ -117,6 +117,7 @@ export async function POST(req: NextRequest) {
     try {
       const response = await openai.responses.create({
         agent_id: OPENAI_AGENT_ID!,
+        model: "gpt-4o", // Satisfy API requirement if agent doesn't specify default
         input: conversationHistory,
       } as any);
 
@@ -139,15 +140,12 @@ export async function POST(req: NextRequest) {
       try {
         if (airtableRecordId) {
           await airtable(AIRTABLE_MESSENGER_TABLE).update(airtableRecordId, {
-            "Conversation Log": JSON.stringify(conversationHistory),
-            "Last Message": messageText,
+            "Message History": JSON.stringify(conversationHistory)
           });
         } else {
           await airtable(AIRTABLE_MESSENGER_TABLE).create({
-            PSID: senderId,
-            "Conversation Log": JSON.stringify(conversationHistory),
-            "Last Message": messageText,
-            Status: "Open",
+            "Facebook User ID": senderId,
+            "Message History": JSON.stringify(conversationHistory)
           });
         }
       } catch (e) {
