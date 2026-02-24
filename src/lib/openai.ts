@@ -29,11 +29,18 @@ Never fabricate pricing or policies. If missing required information, ask clarif
     });
 
     // 2. Format history for the SDK
-    // If conversationHistory is empty, we start fresh. 
-    // If not, we need to ensure it's in the AgentInputItem format.
-    const items: AgentInputItem[] = conversationHistory.length > 0 
-        ? conversationHistory 
-        : [];
+    // The SDK expects `content` to be an array of objects, e.g., [{ type: "input_text", text: "..." }]
+    // Previous messages retrieved from Airtable might be just `{ role: "user", content: "string" }`
+    const items: AgentInputItem[] = conversationHistory.map(item => {
+        if (typeof item.content === 'string') {
+             return {
+                 role: item.role,
+                 content: [{ type: "input_text", text: item.content }]
+             } as AgentInputItem;
+        }
+        // If it's already in the correct AgentInputItem format, return it
+        return item as AgentInputItem;
+    });
 
     // Add the new user message
     items.push({ 
